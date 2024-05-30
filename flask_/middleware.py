@@ -22,10 +22,10 @@
 | |1|2|3|       |K|             |
 +-+-+-+-+-------+-+-------------+
 
-2个字节 --> 根据 Payload len 判断应该用2个字节还是8个字节表示长度
+可以根据需要扩展,仅仅是简单的逻辑demo
 
 """
-import base64,hashlib,zlib,struct,socket,threading
+import base64,hashlib,zlib,struct,socket,flask
 
 SUPPORTED_VERSIONS = ("13", "8", "7")
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -59,7 +59,7 @@ class WebSocketObj(object):
     version = None
     path = None
 
-    def __init__(self, environ, read, write, handler, do_compress,on_ping=None,on_pong=None,on_close=None,on_message=None):
+    def __init__(self, environ, read, write, handler, do_compress,on_ping=None,on_pong=None,on_close=None,on_message=None,on_error=None,on_connect=None) -> None:
         self.environ = environ
         self.closed = False
         self.write = write
@@ -82,12 +82,14 @@ class WebSocketObj(object):
         self.on_pong = on_pong
         self.on_close = on_close
         self.on_message = on_message
-
+        self.on_error = on_error
+        self.on_connect = on_connect
 
     def receive(self):
         while not self.closed:
-            message = self.read_message()
-            self.on_message(message)
+            self.read_message()
+        if self.on_close:
+            self.on_close(self)
 
     def read_message(self):
         opcode = None
@@ -151,7 +153,7 @@ class WebSocketObj(object):
 
             if not length:
                 payload = b""
-            ## 读取数据
+            ## read data
             else:
                 try:
                     payload = self.read(length)
@@ -190,17 +192,17 @@ class WebSocketObj(object):
 
             elif f_opcode == OPCODE_PING:
                 # self.handle_ping(payload)
-                self.on_ping(payload)
+                self.on_ping(self)
                 continue
 
             elif f_opcode == OPCODE_PONG:
                 # self.handle_pong(payload)
-                self.on_pong(payload)
+                self.on_pong(self)
                 continue
 
             elif f_opcode == OPCODE_CLOSE:
                 print('opcode close')
-                self.on_close(payload)
+                self.on_close(self)
                 return
 
             else:
@@ -217,7 +219,8 @@ class WebSocketObj(object):
         if opcode == OPCODE_TEXT:
             message =  self._decode_bytes(message)
 
-        self.on_message(message)
+        if self.on_message:
+            self.on_message(self,message)
 
     def _decode_bytes(self, message):
         try:
@@ -234,12 +237,7 @@ class WebSocketObj(object):
         return payload
 
 
-    # def on_message(self, message):
-    #     print("Received message: {0!r}".format(message))
-    #     self.send_message("Received message: {0!r}".format(message))
-
-
-    def send_message(self, message, opcode=OPCODE_TEXT):
+    def send(self, message, opcode=OPCODE_TEXT):
         if isinstance(message, str):
             message = message.encode("utf-8")
 
@@ -263,20 +261,22 @@ class WebSocketObj(object):
         self.write(message)
 
 
-class WebsocketMiddleWare:
+class SimpleWebsocketMiddleWare:
 
-    def __init__(self,wsgi_app) -> None:
+    def __init__(self,wsgi_app,on_ping,on_pong,on_close,on_message,on_error,on_connect) -> None:
         self.wsgi_app = wsgi_app
         self.protocols = []
-
-    # def init_app(self, app):
-    #     self.wsgi_app = app.wsgi_app
-    #     self.protocols = app.config.get("WEBSOCKET_PROTOCOLS", [])
+        self.on_ping = on_ping
+        self.on_pong = on_pong
+        self.on_close = on_close
+        self.on_message = on_message
+        self.on_error = on_error
+        self.on_connect = on_connect
 
     def __call__(self, environ, start_response):
         ## if url start with ws,then it is a websocket request
-        path:str = environ.get("PATH_INFO")
-        if not path.startswith("/ws") or environ.get("REQUEST_METHOD","") != "GET" or \
+        print(environ)
+        if environ.get("REQUEST_METHOD","") != "GET" or \
             "websocket" not in environ.get("HTTP_UPGRADE","").lower() or \
                 "upgrade" not in environ.get("HTTP_CONNECTION","").lower():
         ### ws request
@@ -341,11 +341,30 @@ class WebsocketMiddleWare:
 
             read = environ["wsgi.input"].read
             write(b"")
-            websocket = WebSocketObj(environ, read, write, self,
-                                            do_compress)
+            websocket = WebSocketObj(
+                environ, 
+                read, 
+                write, 
+                self,
+                do_compress,
+                on_ping=self.on_ping,
+                on_pong=self.on_pong,
+                on_close=self.on_close,
+                on_message=self.on_message,
+                on_error=self.on_error,
+                on_connect=self.on_connect
+            )
             environ.update({
                 "wsgi.websocket_version": version,
                 "wsgi.websocket": websocket
             })
-            # receive message from client
-            return websocket.receive()
+            if self.on_connect:
+                self.on_connect(websocket)
+
+            try:
+                # receive message from client
+                return websocket.receive()
+            except Exception as e:
+                if self.on_error:
+                    self.on_error(websocket, e)
+                raise e from None
