@@ -274,8 +274,7 @@ class SimpleWebsocketMiddleWare:
         self.on_connect = on_connect
 
     def __call__(self, environ, start_response):
-        ## if url start with ws,then it is a websocket request
-        print(environ)
+        ## check if request is websocket
         if environ.get("REQUEST_METHOD","") != "GET" or \
             "websocket" not in environ.get("HTTP_UPGRADE","").lower() or \
                 "upgrade" not in environ.get("HTTP_CONNECTION","").lower():
@@ -283,7 +282,7 @@ class SimpleWebsocketMiddleWare:
             print("request using http protocol")   
             return self.wsgi_app(environ, start_response)
         else:
-            ### http request    
+            ### ws request    
             version = environ.get("HTTP_SEC_WEBSOCKET_VERSION",None)
             if not version:
                 start_response("426 Upgrade Required", [])
